@@ -2,7 +2,7 @@
    personally lifted on it. Media loads lazily and degrades to a clear message
    instead of a broken image when ExerciseDB is not connected. */
 
-import { el, icon, ICONS, openSheet, toast, fmtDate, fmtNum, lineChart, initials } from './util.js';
+import { el, icon, ICONS, openSheet, toast, debounce, fmtDate, fmtNum, lineChart, initials } from './util.js';
 import { settings, exerciseById, upsertExercise, personalRecords, setsForExercise, e1rm } from './state.js';
 import { navigate } from './router.js';
 import * as edb from './edb.js';
@@ -12,21 +12,34 @@ const linkCache = new Map();
 
 /**
  * The built-in catalogue has no ExerciseDB ids, so an exercise you log every
- * week would never show an animation. Look the name up once, remember the
- * match on the exercise record, and it is instant (and synced) from then on.
+ * week would never show an animation. Look the name up once, remember the match
+ * on the exercise record, and it is instant (and synced) from then on.
+ *
+ * Only a confident match is accepted — see edb.nameScore. An unmatched exercise
+ * says so and offers to be linked by hand, because a wrong demonstration is
+ * worse than none.
  */
 async function resolveLink(exercise) {
+  if (exercise.edbId) return { exercise, detail: null, unmatched: false };
+  if (!edb.isReady()) return { exercise, detail: null, unmatched: false };
   if (linkCache.has(exercise.id)) return linkCache.get(exercise.id);
-  if (exercise.edbId || !edb.isReady()) return { exercise, detail: null };
 
-  const match = await edb.findByName(exercise.name);
+  let match = null;
+  try { match = await edb.findByName(exercise.name); } catch { /* offline or quota */ }
   if (!match) {
-    const miss = { exercise, detail: null };
+    const miss = { exercise, detail: null, unmatched: true };
     linkCache.set(exercise.id, miss);
     return miss;
   }
+  const resolved = { exercise: linkExercise(exercise, match), detail: match, unmatched: false };
+  linkCache.set(exercise.id, resolved);
+  return resolved;
+}
 
-  const linked = upsertExercise({
+/** Attach an ExerciseDB match to a local exercise, permanently. */
+export function linkExercise(exercise, match) {
+  linkCache.delete(exercise.id);
+  return upsertExercise({
     id: exercise.id,
     name: exercise.name,
     bodyPart: exercise.bodyPart,
@@ -35,14 +48,46 @@ async function resolveLink(exercise) {
     edbId: match.edbId,
     media: { imageUrl: match.imageUrl, videoUrl: match.videoUrl },
   });
-  // The search result already carries instructions and cues on the v2 API, so
-  // keep it: rendering the guide then costs no second request.
-  const resolved = { exercise: linked, detail: match };
-  linkCache.set(exercise.id, resolved);
-  return resolved;
 }
 
-export function mediaBox(exercise, remote = null) {
+/** A row thumbnail: the real image where we have one, the initial otherwise. */
+export function thumb(exercise, className = 'lib-thumb') {
+  const src = exercise?.media?.imageUrl;
+  const box = el('div', { class: className });
+  if (src && /^https?:\/\//i.test(src)) {
+    const img = el('img', { src, alt: '', loading: 'lazy' });
+    img.addEventListener('error', () => { img.remove(); box.textContent = initials(exercise.name); });
+    box.append(img);
+  } else {
+    box.textContent = initials(exercise?.name);
+  }
+  return box;
+}
+
+/**
+ * The video subscription is a separate catalogue, so an exercise linked through
+ * the image API carries no video URL until we look it up there — once, then it
+ * is stored alongside the image.
+ */
+async function videoUrlFor(exercise) {
+  if (exercise.media?.videoUrl) return exercise.media.videoUrl;
+  if (!edb.hasVideoApi()) return null;
+  let found = null;
+  try { found = await edb.findVideoUrl(exercise.name); } catch { /* leave it to the image */ }
+  if (!found) return null;
+  upsertExercise({
+    id: exercise.id,
+    name: exercise.name,
+    bodyPart: exercise.bodyPart,
+    target: exercise.target,
+    equipment: exercise.equipment,
+    edbId: exercise.edbId,
+    media: { ...(exercise.media || {}), videoUrl: found },
+  });
+  return found;
+}
+
+export function mediaBox(exercise, remote = null, { onRelink = null } = {}) {
   const box = el('div', { class: 'media-box' });
 
   if (!edb.isReady()) {
@@ -53,44 +98,50 @@ export function mediaBox(exercise, remote = null) {
   }
 
   box.append(el('div', { class: 'spinner' }));
-  const note = (text) => { box.innerHTML = ''; box.append(el('div', { class: 'media-note', text })); };
+  const note = (text, action = null) => {
+    box.innerHTML = '';
+    box.append(el('div', { class: 'media-note' }, text,
+      action ? el('div', { style: { marginTop: '12px' } }, action) : null));
+  };
 
   (async () => {
-    const linked = remote ? exercise : (await resolveLink(exercise)).exercise;
-    const source = remote || (linked.edbId || linked.media
-      ? { edbId: linked.edbId, ...(linked.media || {}) }
-      : null);
+    const link = remote ? { exercise, unmatched: false } : await resolveLink(exercise);
+    const linked = link.exercise;
 
-    if (!source || (!source.edbId && !source.imageUrl)) {
-      note(`No match for “${exercise.name}” in ExerciseDB. Search for it on the ExerciseDB tab in the library and open it from there.`);
+    if (link.unmatched) {
+      note(`No confident match for “${exercise.name}” in ExerciseDB — showing nothing rather than the wrong movement.`,
+        onRelink ? el('button', { class: 'btn btn-sm btn-ghost', type: 'button', text: 'Choose the right exercise', onclick: onRelink }) : null);
       return;
     }
 
-    const ref = { edbId: source.edbId, name: exercise.name, imageUrl: source.imageUrl || '', videoUrl: source.videoUrl || '' };
-    const kind = settings.edb.prefer === 'video' ? 'video' : 'gif';
-    // Whichever format the user prefers, fall back to the other rather than
-    // showing nothing when only one of the two covers this movement.
-    const media = await edb.mediaSource(ref, kind)
-      || await edb.mediaSource(ref, kind === 'gif' ? 'video' : 'gif');
+    const source = remote || (linked.edbId || linked.media ? { edbId: linked.edbId, ...(linked.media || {}) } : null);
+    if (!source || (!source.edbId && !source.imageUrl)) {
+      note('This exercise has no media in the API record.');
+      return;
+    }
+
+    // The exercise page prefers video when the video subscription is set up;
+    // lists always stay on the lighter image.
+    const wantVideo = settings.edb.prefer === 'video' && edb.hasVideoApi();
+    const videoUrl = wantVideo && !remote ? await videoUrlFor(linked) : (source.videoUrl || '');
+
+    const ref = { edbId: source.edbId, name: exercise.name, imageUrl: source.imageUrl || '', videoUrl: videoUrl || '' };
+    const media = (videoUrl ? await edb.mediaSource(ref, 'video') : null)
+      || await edb.mediaSource(ref, 'gif')
+      || await edb.mediaSource(ref, 'video');
 
     if (!media) {
-      box.innerHTML = '';
-      box.append(el('div', { class: 'media-note' },
-        `Could not load the animation — ${edb.lastMediaError() || 'no reason given'}.`,
-        el('div', { style: { marginTop: '10px' } },
-          el('button', {
-            class: 'btn btn-sm btn-ghost', type: 'button', text: 'Fix the media route',
-            onclick: () => navigate('settings'),
-          }))));
+      note(`Could not load the media — ${edb.lastMediaError() || 'no reason given'}.`,
+        el('button', { class: 'btn btn-sm btn-ghost', type: 'button', text: 'Open media settings', onclick: () => navigate('settings') }));
       return;
     }
 
     box.innerHTML = '';
     const shown = media.isVideo
-      ? el('video', { src: media.src, autoplay: true, loop: true, muted: true, playsinline: true })
+      ? el('video', { src: media.src, autoplay: true, loop: true, muted: true, playsinline: true, controls: false })
       : el('img', { src: media.src, alt: exercise.name, loading: 'lazy' });
-    // A cross-origin URL is shown without a fetch, so failure surfaces here.
-    shown.addEventListener('error', () => note('The media host did not serve this file to the app.'));
+    shown.addEventListener('error', () => note('The media host did not serve this file to the app.',
+      onRelink ? el('button', { class: 'btn btn-sm btn-ghost', type: 'button', text: 'Choose another exercise', onclick: onRelink }) : null));
     box.append(shown);
   })();
 
@@ -109,7 +160,12 @@ export function openExerciseDetail(exerciseId, { onAdd = null } = {}) {
       el('span', { class: 'tag', text: exercise.equipment }));
 
     const guide = el('div', { style: { marginTop: '16px' } });
-    body.append(mediaBox(exercise), tags, guide, historyBlock(exerciseId));
+    const relink = () => openRelinkSheet(exercise, () => {
+      api.close();
+      openExerciseDetail(exerciseId, { onAdd });
+    });
+
+    body.append(mediaBox(exercise, null, { onRelink: relink }), tags, guide, historyBlock(exerciseId));
 
     if (onAdd) {
       api.setFooter(el('button', {
@@ -119,15 +175,65 @@ export function openExerciseDetail(exerciseId, { onAdd = null } = {}) {
     }
 
     if (edb.isReady()) {
-      resolveLink(exercise).then(({ exercise: linked, detail }) => {
+      resolveLink(exercise).then(({ exercise: linked, detail, unmatched }) => {
         if (detail?.instructions?.length) renderGuide(detail, guide);
         else if (linked.edbId) loadGuide(linked.edbId, guide);
-        else guide.append(el('p', { class: 'muted small', text: 'No matching entry in ExerciseDB, so there are no instructions for this one.' }));
+        if (!unmatched) {
+          guide.append(el('button', {
+            class: 'btn btn-quiet btn-sm', type: 'button', style: { marginTop: '10px', padding: '4px 0' },
+            text: 'Wrong movement shown? Pick another', onclick: relink,
+          }));
+        }
       });
     } else {
       guide.append(el('p', { class: 'muted small', text: 'Step-by-step instructions and animations come from ExerciseDB. Connect it in Settings to see them here.' }));
     }
     return body;
+  });
+}
+
+/**
+ * Manual override for the automatic name match: search ExerciseDB and pin the
+ * chosen entry to this exercise for good.
+ */
+export function openRelinkSheet(exercise, onDone) {
+  openSheet({ title: `Link “${exercise.name}”`, tall: true }, (api) => {
+    const input = el('input', { class: 'input', type: 'search', value: exercise.name, placeholder: 'Search ExerciseDB…' });
+    const results = el('div', { class: 'stack', style: { marginTop: '12px' } });
+    const status = el('div', { class: 'center muted small', style: { padding: '10px 0' } });
+
+    const run = debounce(async () => {
+      status.hidden = false;
+      status.textContent = 'Searching ExerciseDB…';
+      results.innerHTML = '';
+      try {
+        const list = await edb.search({ query: input.value, limit: 40 });
+        status.hidden = list.length > 0;
+        if (!list.length) { status.textContent = 'Nothing matched that search.'; return; }
+        for (const item of list) {
+          results.append(el('button', {
+            class: 'row', type: 'button',
+            onclick: () => { linkExercise(exercise, item); api.close(); toast('Linked', 'ok'); onDone?.(); },
+          },
+            thumb({ name: item.name, media: { imageUrl: item.imageUrl } }),
+            el('div', { class: 'row-main' },
+              el('div', { class: 'row-title', text: item.name }),
+              el('div', { class: 'row-sub', text: [item.targets[0], item.equipments[0]].filter(Boolean).join(' · ') })),
+            icon(ICONS.chevron, { class: 'chev' })));
+        }
+      } catch (err) {
+        status.hidden = false;
+        status.textContent = err.message;
+      }
+    }, 320);
+
+    input.addEventListener('input', run);
+    run();
+    return el('div', {},
+      el('p', { class: 'small muted', style: { margin: '0 0 10px', lineHeight: '1.5' } },
+        'Pick the entry that shows this movement. The choice is saved and used from now on.'),
+      el('div', { class: 'search-wrap' }, icon(ICONS.search), input),
+      status, results);
   });
 }
 

@@ -457,15 +457,118 @@ async function probeDetailRoute(sample, note) {
   saveSettings();
 }
 
-/** Best match for a name, used to attach animations to the built-in exercises. */
-export async function findByName(name) {
-  const list = await search({ query: name, limit: 25 });
-  if (!list.length) return null;
-  const want = name.trim().toLowerCase();
-  return list.find((e) => e.name.toLowerCase() === want)
-    || list.find((e) => e.name.toLowerCase().endsWith(want))
-    || list.find((e) => e.name.toLowerCase().includes(want))
-    || list[0];
+const words = (name) => String(name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+
+/**
+ * How well a candidate name matches the one we are looking for, 0–1.
+ *
+ * Returning the closest row is not good enough here: asked for "Back
+ * Extension", ExerciseDB's first hit was a lying dumbbell triceps extension,
+ * and a confidently wrong demonstration is worse than none. So a match counts
+ * only when every word of the exercise appears in the candidate and the two
+ * names largely overlap — "Leg Curl" may resolve to "Lever Seated Leg Curl",
+ * but "Back Extension" will not resolve to "Dumbbell Lying Triceps Extension".
+ */
+export function nameScore(wanted, candidate) {
+  const a = words(wanted);
+  const b = words(candidate);
+  if (!a.length || !b.length) return 0;
+  if (a.join(' ') === b.join(' ')) return 1;
+
+  const setB = new Set(b);
+  const covered = a.filter((w) => setB.has(w)).length;
+  if (covered < a.length) return 0;                       // a word is missing entirely
+  const union = new Set([...a, ...b]).size;
+  return covered / union;                                 // shared words vs. all words
+}
+
+export const MATCH_THRESHOLD = 0.45;
+
+/**
+ * Confident match for a name, or null. Used to attach animations to the
+ * built-in catalogue without ever showing the wrong movement.
+ */
+export async function findByName(name, candidates = null) {
+  const list = candidates || await search({ query: name, limit: 25 });
+  let best = null;
+  let bestScore = 0;
+  for (const item of list) {
+    const score = nameScore(name, item.name);
+    if (score > bestScore) { best = item; bestScore = score; }
+  }
+  return bestScore >= MATCH_THRESHOLD ? best : null;
+}
+
+/**
+ * Page through the whole catalogue once, so the entire local library can be
+ * linked in one go instead of one search per exercise.
+ */
+export async function fetchCatalogue({ onProgress = () => {}, pageSize = 100, maxPages = 25 } = {}) {
+  if (!isReady()) throw new ApiError('ExerciseDB is not connected yet.');
+  const all = [];
+  const seen = new Set();
+  let offset = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const json = await request(cfg().basePath, { limit: pageSize, offset });
+    const batch = listFrom(json).map(normalize).filter(Boolean);
+    if (!batch.length) break;
+
+    // The server may cap `limit` below what we asked for, so page by what it
+    // actually returned rather than by what we requested.
+    let fresh = 0;
+    for (const item of batch) {
+      if (item.edbId && seen.has(item.edbId)) continue;
+      if (item.edbId) seen.add(item.edbId);
+      all.push(item);
+      fresh += 1;
+    }
+    offset += batch.length;
+    onProgress(all.length, page + 1);
+    if (!fresh) break;
+  }
+  return all;
+}
+
+/* ---------- the second subscription, for video ---------------------------- */
+
+export const hasVideoApi = () => Boolean(cfg().videoHost && (cfg().videoKey || cfg().key));
+
+/** Discover the exercises path on the video subscription. */
+export async function probeVideo(onStep = () => {}) {
+  const note = (line) => onStep(line);
+  if (!hasVideoApi()) throw new ApiError('Add the video API host and key first.');
+  for (const path of LIST_PATHS) {
+    try {
+      note(`GET ${path}?limit=3 on the video API …`);
+      const json = await request(path, { limit: 3, offset: 0 }, 'video');
+      const list = listFrom(json).map(normalize).filter(Boolean);
+      if (list.length) {
+        cfg().videoBasePath = path;
+        saveSettings();
+        const withVideo = list.filter((e) => e.videoUrl).length;
+        note(`  ✓ ${list.length} records, ${withVideo} with a video URL`);
+        note(`  example video: ${list.find((e) => e.videoUrl)?.videoUrl || '(none in this sample)'}`);
+        return { basePath: path, sample: list[0] };
+      }
+      note('  · responded, but no exercise array found');
+    } catch (err) {
+      note(`  · ${err.message}`);
+      if (err.status === 401 || err.status === 403) throw err;
+    }
+  }
+  throw new ApiError('No working endpoint found on the video API.');
+}
+
+/** Confident video match for an exercise name, or null. */
+export async function findVideoUrl(name) {
+  const c = cfg();
+  if (!hasVideoApi() || !c.videoBasePath) return null;
+  const params = { limit: 25 };
+  if (c.searchStyle && c.searchStyle !== 'client') params[c.searchStyle] = name;
+  const json = await request(c.videoBasePath, params, 'video');
+  const list = listFrom(json).map(normalize).filter(Boolean);
+  const match = await findByName(name, list);
+  return match?.videoUrl || null;
 }
 
 export async function clearMediaCache() {

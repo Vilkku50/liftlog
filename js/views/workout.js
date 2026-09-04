@@ -10,7 +10,7 @@ import {
   finishWorkout, discardWorkout, e1rm, num, personalRecords, workoutVolume, workoutSetCount,
 } from '../state.js';
 import { pickExercises } from '../picker.js';
-import { openExerciseDetail } from '../exercise-detail.js';
+import { openExerciseDetail, thumb } from '../exercise-detail.js';
 import { startRest, stopRest, primeAudio } from '../rest.js';
 import { navigate } from '../router.js';
 
@@ -116,7 +116,7 @@ export function render(root) {
     const body = el('tbody', {});
     const card = el('div', { class: 'ex-card' },
       el('div', { class: 'ex-head' },
-        el('div', { class: 'ex-thumb', text: name.charAt(0).toUpperCase(), onclick: () => openExerciseDetail(entry.exerciseId) }),
+        el('div', { onclick: () => openExerciseDetail(entry.exerciseId) }, thumb(exercise || { name }, 'ex-thumb')),
         el('div', { class: 'grow', onclick: () => openExerciseDetail(entry.exerciseId) },
           el('div', { class: 'ex-name', text: name }),
           el('div', { class: 'ex-meta', text: prev ? `Last time ${fmtDate(prev.at)}` : 'First time logging this' })),

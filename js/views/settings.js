@@ -4,6 +4,7 @@
 
 import { el, icon, ICONS, toast, confirmSheet, fmtDate } from '../util.js';
 import { db, settings, saveSettings, allExercises, finishedWorkouts, activeRoutines } from '../state.js';
+import { linkExercise } from '../exercise-detail.js';
 import * as edb from '../edb.js';
 import * as sync from '../sync.js';
 import { navigate } from '../router.js';
@@ -75,8 +76,8 @@ function animationsCard() {
     'Stored only in this browser. It is never written to GitHub or sent anywhere except RapidAPI.', 'password');
 
   const prefer = el('select', { class: 'select', onchange: (e) => { c.prefer = e.target.value; saveSettings(); } },
-    el('option', { value: 'gif', text: 'Animated GIF (lighter, loops)', selected: c.prefer !== 'video' }),
-    el('option', { value: 'video', text: 'Video (sharper, more data)', selected: c.prefer === 'video' }));
+    el('option', { value: 'gif', text: 'Image or GIF (lighter, loops)', selected: c.prefer !== 'video' }),
+    el('option', { value: 'video', text: 'Video on the exercise page', selected: c.prefer === 'video' }));
 
   const log = el('pre', { class: 'code', hidden: true });
   const statusLine = el('div', { class: 'small', style: { marginTop: '10px' } });
@@ -139,6 +140,70 @@ function animationsCard() {
     statusLine.textContent = 'Not connected. The app works fully without this; you just will not see animations.';
   }
 
+  const linkBtn = el('button', {
+    class: 'btn btn-ghost btn-block', type: 'button', style: { marginTop: '8px' },
+    onclick: async () => {
+      linkBtn.disabled = true;
+      log.hidden = false;
+      log.textContent = '';
+      const write = (line) => { log.textContent += line + '\n'; };
+      try {
+        write('Downloading the catalogue …');
+        const catalogue = await edb.fetchCatalogue({
+          onProgress: (count, page) => {
+            linkBtn.textContent = `Fetched ${count}…`;
+            log.textContent = `Downloading the catalogue … ${count} exercises (${page} request${page === 1 ? '' : 's'})\n`;
+          },
+        });
+        write(`Matching ${allExercises().length} of your exercises against ${catalogue.length} entries …`);
+        let linked = 0;
+        const missed = [];
+        for (const exercise of allExercises()) {
+          if (exercise.edbId) continue;
+          const match = await edb.findByName(exercise.name, catalogue);
+          if (match) { linkExercise(exercise, match); linked += 1; }
+          else missed.push(exercise.name);
+        }
+        write(`\n✓ Linked ${linked} exercise${linked === 1 ? '' : 's'}.`);
+        if (missed.length) {
+          write(`\nNo confident match for ${missed.length} (open one and use “Choose the right exercise” to link it by hand):`);
+          write(missed.join(', '));
+        }
+        toast(linked ? `Linked ${linked} exercises` : 'Nothing new to link', 'ok');
+        // Deliberately no re-render here: it would wipe the report just written.
+      } catch (err) {
+        write(`\n${err.message}`);
+        toast('Linking failed', 'err');
+      } finally {
+        linkBtn.disabled = false;
+        linkBtn.textContent = 'Link my library to ExerciseDB';
+      }
+    },
+  }, 'Link my library to ExerciseDB');
+
+  const videoBtn = el('button', {
+    class: 'btn btn-ghost btn-block', type: 'button', style: { marginTop: '8px' },
+    onclick: async () => {
+      videoBtn.disabled = true;
+      videoBtn.textContent = 'Testing video API…';
+      log.hidden = false;
+      log.textContent = '';
+      try {
+        await edb.probeVideo((line) => { log.textContent += line + '\n'; });
+        c.prefer = 'video';
+        prefer.value = 'video';
+        saveSettings();
+        toast('Video API connected', 'ok');
+      } catch (err) {
+        log.textContent += `\n${err.message}\n`;
+        toast('Video API test failed', 'err');
+      } finally {
+        videoBtn.disabled = false;
+        videoBtn.textContent = 'Test the video API';
+      }
+    },
+  }, 'Test the video API');
+
   const cacheLine = el('div', { class: 'small muted', style: { marginTop: '10px' } });
   edb.mediaCacheSize().then((n) => { cacheLine.textContent = `${n} animation${n === 1 ? '' : 's'} cached on this device.`; });
 
@@ -165,6 +230,8 @@ function animationsCard() {
     el('label', { class: 'field' }, el('span', { class: 'label', text: 'Preferred media' }), prefer),
     testBtn,
     edb.isConfigured() ? mediaBtn : null,
+    edb.hasVideoApi() ? videoBtn : null,
+    edb.isReady() ? linkBtn : null,
     statusLine, log, cacheLine, advanced,
   ]);
 }

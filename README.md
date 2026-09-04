@@ -76,10 +76,26 @@ still images, and whether a per-exercise route exists for the step-by-step
 instructions. If nothing works, it prints the raw record so the right route can
 be added.
 
-The 99 built-in exercises carry no ExerciseDB id, so the first time you open one
-the app looks its name up once, stores the match on the exercise, and every
-later open is instant and offline. That link syncs with the rest of your data,
-so a second device does not spend the lookup again.
+### Linking your library
+
+The 99 built-in exercises carry no ExerciseDB id. **Settings → Link my library to
+ExerciseDB** pages through the catalogue once (a handful of requests) and links
+everything it can in one go; after that every list row has a thumbnail and every
+exercise page has its animation, stored locally and synced to your other
+devices. Opening an unlinked exercise also looks it up on its own.
+
+A match is only accepted when it is confident: every word of your exercise name
+has to appear in the candidate, and the two names must largely overlap. Asked
+for *Back Extension*, the API's top hit was a lying dumbbell triceps extension —
+a confidently wrong demonstration is worse than none, so that is rejected and
+the exercise page says so, with a **Choose the right exercise** button that lets
+you search and pin the correct entry by hand. Every exercise page also carries a
+quiet *Wrong movement shown?* link for the same purpose.
+
+If you also subscribe to the video edition, put its host and key under Advanced
+and press **Test the video API**. Exercise pages then play the video (looked up
+by name on that subscription, once per exercise) while lists stay on the lighter
+still images.
 
 ## Setting up backup and sync (optional)
 

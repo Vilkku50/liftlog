@@ -209,5 +209,66 @@ ok('the match carries the media file names', byName.imageUrl === 'Barbell-Bench-
 const noMatch = await edb.findByName('Zercher Good Morning');
 ok('an unknown name returns nothing rather than a wrong exercise', noMatch === null);
 
+/* ---------- name matching ---------------------------------------------------- */
+
+// Asked for "Back Extension", the API's first hit was a lying dumbbell triceps
+// extension, and the app showed it. A confidently wrong demonstration is worse
+// than none, so these pairs are the contract.
+const MATCHES = [
+  ['Back Extension', 'Back Extension', true],
+  ['Back Extension', 'Dumbbell Lying Triceps Extension', false],
+  ['Back Extension', 'Hyperextension', false],
+  ['Deadlift', 'Barbell Romanian Deadlift', false],
+  ['Barbell Bench Press', 'Dumbbell Bench Press', false],
+  ['Leg Curl', 'Lever Seated Leg Curl', true],
+  ['Barbell Bench Press', 'Barbell Bench Press - Medium Grip', true],
+  ['Pull-Up', 'Pull Up', true],
+  ['Face Pull', 'Cable Face Pull', true],
+];
+for (const [wanted, candidate, shouldMatch] of MATCHES) {
+  const score = edb.nameScore(wanted, candidate);
+  ok(`${shouldMatch ? 'matches' : 'rejects'}: ${wanted} → ${candidate}`,
+    (score >= edb.MATCH_THRESHOLD) === shouldMatch, `(score ${score.toFixed(2)})`);
+}
+
+/* ---------- catalogue paging ------------------------------------------------- */
+
+// The server caps `limit` at 25 however much we ask for — paging must follow
+// what came back, not what was requested, or the library links only one page.
+const CATALOGUE = Array.from({ length: 60 }, (_, i) => ({
+  exerciseId: `x${i}`, name: `Exercise ${i}`, imageUrl: `https://cdn.test/${i}.png`, bodyParts: ['chest'],
+}));
+let pageRequests = 0;
+globalThis.fetch = async (url) => {
+  const u = new URL(String(url));
+  pageRequests += 1;
+  const offset = Number(u.searchParams.get('offset') || 0);
+  const slice = CATALOGUE.slice(offset, offset + 25);
+  return new Response(JSON.stringify({ data: { exercises: slice } }), { status: 200 });
+};
+Object.assign(state.settings.edb, { basePath: '/api/v1/exercises', searchStyle: 'q' });
+
+const pagedCatalogue = await edb.fetchCatalogue({ pageSize: 100 });
+eq('paging follows the server cap and reads every page', pagedCatalogue.length, 60);
+ok('paging stops once the catalogue runs out', pageRequests <= 4, `(made ${pageRequests} requests)`);
+
+/* ---------- the video subscription ------------------------------------------- */
+
+globalThis.fetch = async (url) => {
+  const u = new URL(String(url));
+  if (u.hostname !== 'video.p.rapidapi.com') return new Response('{}', { status: 404 });
+  const q = (u.searchParams.get('q') || '').toLowerCase();
+  const all = [
+    { exerciseId: 'v1', name: 'Barbell Bench Press', videoUrl: 'https://cdn.test/bench.mp4' },
+    { exerciseId: 'v2', name: 'Dumbbell Lying Triceps Extension', videoUrl: 'https://cdn.test/tri.mp4' },
+  ];
+  const list = q ? all.filter((e) => e.name.toLowerCase().includes(q)) : all;
+  return new Response(JSON.stringify({ data: { exercises: list } }), { status: 200 });
+};
+Object.assign(state.settings.edb, { videoHost: 'video.p.rapidapi.com', videoKey: 'vk', videoBasePath: '/api/v1/exercises' });
+
+eq('a video is found on the second subscription', await edb.findVideoUrl('Barbell Bench Press'), 'https://cdn.test/bench.mp4');
+eq('a video is not invented for an unmatched name', await edb.findVideoUrl('Back Extension'), null);
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

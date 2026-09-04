@@ -2,11 +2,11 @@
    when you open an exercise, not for every row, so a scroll through the
    catalogue costs one API call instead of forty. */
 
-import { el, icon, ICONS, initials, toast, debounce, emptyState, menuSheet } from '../util.js';
+import { el, icon, ICONS, toast, debounce, emptyState, menuSheet } from '../util.js';
 import { settings, saveSettings, allExercises, deleteExercise } from '../state.js';
 import { BODY_PARTS, EQUIPMENT } from '../seed.js';
 import { searchLocal, adoptRemote, createExerciseSheet } from '../picker.js';
-import { openExerciseDetail } from '../exercise-detail.js';
+import { openExerciseDetail, thumb } from '../exercise-detail.js';
 import { navigate } from '../router.js';
 import * as edb from '../edb.js';
 
@@ -92,11 +92,10 @@ export function render(root) {
 
   function localRow(exercise) {
     return el('button', { class: 'row', type: 'button', onclick: () => openDetail(exercise.id) },
-      el('div', { class: 'lib-thumb', text: initials(exercise.name) }),
+      thumb(exercise),
       el('div', { class: 'row-main' },
         el('div', { class: 'row-title', text: exercise.name }),
         el('div', { class: 'row-sub', text: [exercise.target, exercise.equipment].filter(Boolean).join(' · ') })),
-      exercise.edbId ? el('span', { class: 'tag primary', text: 'GIF' }) : null,
       icon(ICONS.chevron, { class: 'chev' }));
   }
 
@@ -105,7 +104,7 @@ export function render(root) {
       class: 'row', type: 'button',
       onclick: () => { const rec = adoptRemote(remote); openDetail(rec.id); },
     },
-      el('div', { class: 'lib-thumb', text: initials(remote.name) }),
+      thumb({ name: remote.name, media: { imageUrl: remote.imageUrl } }),
       el('div', { class: 'row-main' },
         el('div', { class: 'row-title', text: remote.name }),
         el('div', { class: 'row-sub', text: [remote.targets[0], remote.equipments[0]].filter(Boolean).join(' · ') })),

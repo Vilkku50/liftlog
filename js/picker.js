@@ -2,7 +2,8 @@
    editor and the library. Searches the built-in catalogue instantly and, when
    ExerciseDB is connected, the 11k-exercise online catalogue as a second tab. */
 
-import { el, icon, ICONS, debounce, initials, toast, openSheet, emptyState } from './util.js';
+import { el, icon, ICONS, debounce, toast, openSheet, emptyState } from './util.js';
+import { thumb } from './exercise-detail.js';
 import { allExercises, upsertExercise } from './state.js';
 import { BODY_PARTS, EQUIPMENT, slugify } from './seed.js';
 import * as edb from './edb.js';
@@ -161,7 +162,7 @@ export function pickExercises({ title = 'Add exercise', multi = true } = {}) {
             style: on ? { borderColor: 'var(--accent-line)', background: 'var(--accent-soft)' } : {},
             onclick: () => pick(item),
           },
-            el('div', { class: 'lib-thumb', text: initials(item.name) }),
+            thumb(item),
             el('div', { class: 'row-main' },
               el('div', { class: 'row-title', text: item.name }),
               el('div', { class: 'row-sub', text: [item.target, item.equipment].filter(Boolean).join(' · ') })),
@@ -179,6 +180,7 @@ export function pickExercises({ title = 'Add exercise', multi = true } = {}) {
             id: `edb-${r.edbId}`, name: r.name,
             target: r.targets[0] || r.bodyParts[0] || '',
             equipment: r.equipments[0] || '',
+            media: { imageUrl: r.imageUrl },
             remote: r,
           })));
         } catch (err) {

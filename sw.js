@@ -1,7 +1,7 @@
 /* Offline shell. The gym is exactly where the connection dies, so the whole app
    is cached and served cache-first; only the two APIs are always live. */
 
-const CACHE = 'liftlog-shell-v3';
+const CACHE = 'liftlog-shell-v4';
 const SHELL = [
   './',
   './index.html',

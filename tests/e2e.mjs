@@ -359,6 +359,74 @@ await step('a full CDN media URL is shown even when fetch would be blocked by CO
   await ctx3.close();
 });
 
+await step('bulk linking fills the library with thumbnails, and a bad match can be fixed by hand', async () => {
+  const { readFileSync } = await import('node:fs');
+  const imageBytes = readFileSync(new URL('../icons/icon-192.png', import.meta.url));
+
+  const ctx4 = await browser.newContext({ ...devices['Pixel 7'] });
+  const p4 = await ctx4.newPage();
+
+  // A catalogue that covers some built-ins exactly, and offers only a decoy for
+  // Back Extension — the case that used to show the wrong movement.
+  const catalogue = [
+    { exerciseId: 'c1', name: 'barbell bench press', imageUrl: 'https://assets.example.test/m/1.png', bodyParts: ['chest'], targetMuscles: ['pectorals'], equipments: ['barbell'] },
+    { exerciseId: 'c2', name: 'back squat', imageUrl: 'https://assets.example.test/m/2.png', bodyParts: ['upper legs'], targetMuscles: ['quads'], equipments: ['barbell'] },
+    { exerciseId: 'c3', name: 'lever seated leg curl', imageUrl: 'https://assets.example.test/m/3.png', bodyParts: ['upper legs'], targetMuscles: ['hamstrings'], equipments: ['leverage machine'] },
+    { exerciseId: 'c4', name: 'dumbbell lying triceps extension', imageUrl: 'https://assets.example.test/m/4.png', bodyParts: ['upper arms'], targetMuscles: ['triceps'], equipments: ['dumbbell'] },
+  ];
+
+  await ctx4.route('https://fake.p.rapidapi.com/**', async (route) => {
+    const u = new URL(route.request().url());
+    if (u.pathname !== '/api/v1/exercises') {
+      return route.fulfill({ status: 404, contentType: 'application/json', body: '{"message":"no route"}' });
+    }
+    const q = (u.searchParams.get('q') || '').toLowerCase();
+    const offset = Number(u.searchParams.get('offset') || 0);
+    const list = q ? catalogue.filter((e) => e.name.includes(q)) : catalogue.slice(offset);
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { exercises: list } }) });
+  });
+  await ctx4.route('https://assets.example.test/**', (route) =>
+    route.fulfill({ status: 200, contentType: 'image/png', body: imageBytes }));
+
+  await p4.addInitScript(() => {
+    localStorage.setItem('liftlog.settings.v1', JSON.stringify({
+      unit: 'kg', restDefault: 120, seeded: true,
+      edb: { host: 'fake.p.rapidapi.com', key: 'k', basePath: '/api/v1/exercises', searchStyle: 'q', mediaTemplate: '', prefer: 'gif' },
+      sync: { token: '', owner: '', repo: 'liftlog-data', path: 'liftlog.json', branch: 'main', enabled: false },
+    }));
+  });
+  await p4.goto(BASE, { waitUntil: 'networkidle' });
+
+  await p4.locator('#settings-btn').click();
+  await p4.locator('button', { hasText: 'Link my library to ExerciseDB' }).click();
+  await p4.waitForSelector('.code:has-text("Linked")', { timeout: 20000 });
+  const report = await p4.locator('.code').textContent();
+  if (!/Linked [1-9]/.test(report)) throw new Error(`nothing was linked: ${report}`);
+  if (!report.includes('Back Extension')) throw new Error('Back Extension should be reported as unmatched');
+
+  await p4.locator('#tabbar .tab', { hasText: 'Library' }).click();
+  await p4.waitForTimeout(400);
+  const thumbs = await p4.locator('#view .row .lib-thumb img').count();
+  if (thumbs < 3) throw new Error(`expected thumbnails on the linked rows, found ${thumbs}`);
+  await p4.screenshot({ path: `${OUT}/shot-library-thumbs.png` });
+
+  // The unmatched exercise must refuse to guess, and offer a manual fix.
+  await p4.locator('#view input[type=search]').fill('back extension');
+  await p4.waitForTimeout(300);
+  await p4.locator('#view .row').first().click();
+  await p4.waitForSelector('text=No confident match');
+  await p4.locator('.sheet button', { hasText: 'Choose the right exercise' }).click();
+  await p4.waitForSelector('.sheet-head h3:has-text("Link")');
+  await p4.locator('.sheet input[type=search]').last().fill('extension');
+  await p4.waitForTimeout(500);
+  await p4.locator('.sheet .row').first().click();
+  await p4.waitForSelector('.media-box img', { timeout: 8000 });
+  const decoded = await p4.locator('.media-box img').evaluate((img) => img.complete && img.naturalWidth > 0);
+  if (!decoded) throw new Error('the hand-picked exercise did not show its media');
+
+  await ctx4.close();
+});
+
 await browser.close();
 console.log('\n--- errors ---');
 console.log(errors.length ? errors.join('\n') : 'none');

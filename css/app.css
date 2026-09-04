@@ -563,7 +563,8 @@ body.resting #view { padding-bottom: calc(90px + var(--safe-b)); }
   display: grid; place-items: center; overflow: hidden;
   color: var(--dim-2); font-weight: 700; font-size: 16px;
 }
-.lib-thumb img { width: 100%; height: 100%; object-fit: cover; background: #fff; }
+.lib-thumb img, .ex-thumb img { width: 100%; height: 100%; object-fit: contain; background: #fff; }
+.ex-thumb { overflow: hidden; }
 
 .instructions { counter-reset: step; padding: 0; margin: 0; list-style: none; }
 .instructions li {
