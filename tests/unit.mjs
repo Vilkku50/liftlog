@@ -171,5 +171,43 @@ state.settings.edb.searchStyle = 'client';
 const clientSide = await edb.search({ query: 'row' });
 eq('client-side filtering works as a fallback', clientSide.map((r) => r.name), ['Barbell Row']);
 
+/* ---------- media route discovery ------------------------------------------ */
+
+// This fake edition serves media only from /images/{file}, and the record
+// carries a bare file name — the shape that leaves animations blank until the
+// right template is discovered.
+const withMedia = [{
+  exerciseId: 'exr_1', name: 'Barbell Bench Press', bodyParts: ['chest'],
+  imageUrl: 'Barbell-Bench-Press-Chest.gif', videoUrl: 'Barbell-Bench-Press-Chest.mp4',
+}];
+const mediaRequests = [];
+globalThis.fetch = async (url, options = {}) => {
+  const u = new URL(String(url));
+  mediaRequests.push(u.pathname + u.search);
+  if (u.pathname === '/api/v1/exercises') {
+    const q = u.searchParams.get('q');
+    const list = q ? withMedia.filter((e) => e.name.toLowerCase().includes(q.toLowerCase())) : withMedia;
+    return new Response(JSON.stringify({ data: { exercises: list } }), { status: 200 });
+  }
+  if (u.pathname === '/images/Barbell-Bench-Press-Chest.gif') {
+    if (!options.headers?.['x-rapidapi-key']) return new Response('no key', { status: 401 });
+    return new Response(new Uint8Array(4096), { status: 200, headers: { 'Content-Type': 'image/gif' } });
+  }
+  return new Response(JSON.stringify({ message: 'no route' }), { status: 404 });
+};
+Object.assign(state.settings.edb, { basePath: '/api/v1/exercises', searchStyle: 'q', mediaTemplate: '' });
+
+const media = await edb.probeMedia();
+eq('the working media route is discovered', media.template, '/images/{file}');
+eq('the discovered route is saved', state.settings.edb.mediaTemplate, '/images/{file}');
+ok('the failing routes were actually tried', mediaRequests.some((r) => r.startsWith('/image?exerciseId=')));
+
+const byName = await edb.findByName('Barbell Bench Press');
+eq('a built-in exercise can be matched by name', byName.edbId, 'exr_1');
+ok('the match carries the media file names', byName.imageUrl === 'Barbell-Bench-Press-Chest.gif');
+
+const noMatch = await edb.findByName('Zercher Good Morning');
+ok('an unknown name returns nothing rather than a wrong exercise', noMatch === null);
+
 console.log(failures ? `\n${failures} failing check(s)` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

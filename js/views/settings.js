@@ -106,6 +106,31 @@ function animationsCard() {
     },
   }, 'Test connection & auto-detect');
 
+  const mediaBtn = el('button', {
+    class: 'btn btn-ghost btn-block', type: 'button', style: { marginTop: '8px' },
+    onclick: async () => {
+      mediaBtn.disabled = true;
+      mediaBtn.textContent = 'Testing media routes…';
+      log.hidden = false;
+      log.textContent = '';
+      try {
+        const result = await edb.probeMedia((line) => { log.textContent += line + '\n'; });
+        if (result.direct) toast('Media works straight from the record URL', 'ok');
+        else if (result.template) toast(`Media route found: ${result.template}`, 'ok');
+        else {
+          toast('No media route worked — see the log', 'err');
+          log.textContent += `\nRaw record for support:\n${JSON.stringify(result.raw).slice(0, 1500)}\n`;
+        }
+      } catch (err) {
+        log.textContent += `\n${err.message}\n`;
+        toast('Media test failed', 'err');
+      } finally {
+        mediaBtn.disabled = false;
+        mediaBtn.textContent = 'Find the media route';
+      }
+    },
+  }, 'Find the media route');
+
   if (edb.isReady()) {
     statusLine.append(el('span', { class: 'tag primary', text: 'Connected' }), ' ', `endpoint ${c.basePath}`);
   } else if (edb.isConfigured()) {
@@ -135,10 +160,12 @@ function animationsCard() {
 
   return card('Exercise animations', [
     el('p', { class: 'small muted', style: { marginTop: '-2px', marginBottom: '12px', lineHeight: '1.5' } },
-      'Subscribe to an ExerciseDB API on RapidAPI, then paste the host and key from its code snippet. Animations are downloaded once per exercise and cached, so browsing does not eat your monthly quota.'),
+      'Subscribe to an ExerciseDB API on RapidAPI, then paste the host and key from its code snippet. Run both tests below: the first finds the exercise endpoint, the second finds the route that serves the animations. Media is downloaded once per exercise and cached, so browsing does not eat your monthly quota.'),
     host, key,
     el('label', { class: 'field' }, el('span', { class: 'label', text: 'Preferred media' }), prefer),
-    testBtn, statusLine, log, cacheLine, advanced,
+    testBtn,
+    edb.isConfigured() ? mediaBtn : null,
+    statusLine, log, cacheLine, advanced,
   ]);
 }
 

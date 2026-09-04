@@ -204,6 +204,82 @@ await step('service worker registered', async () => {
   if (!ok) throw new Error('no service worker registration');
 });
 
+/* ---- animations, against a stand-in for the RapidAPI edition -------------- */
+
+await step('a built-in exercise links itself to ExerciseDB and shows the animation', async () => {
+  const { readFileSync } = await import('node:fs');
+  const imageBytes = readFileSync(new URL('../icons/icon-192.png', import.meta.url));
+
+  const ctx2 = await browser.newContext({ ...devices['Pixel 7'] });
+  const p2 = await ctx2.newPage();
+  const seen = [];
+
+  // Stand in for the API: exercises on /api/v1/exercises, media on /images/{file}.
+  await ctx2.route('https://fake.p.rapidapi.com/**', async (route) => {
+    const u = new URL(route.request().url());
+    seen.push(u.pathname);
+    if (!route.request().headers()['x-rapidapi-key']) {
+      return route.fulfill({ status: 401, body: 'no key' });
+    }
+    if (u.pathname === '/api/v1/exercises') {
+      const q = (u.searchParams.get('q') || '').toLowerCase();
+      const all = [{
+        exerciseId: 'exr_1',
+        name: 'Barbell Bench Press',
+        bodyParts: ['chest'],
+        targetMuscles: ['Pectoralis Major'],
+        equipments: ['barbell'],
+        imageUrl: 'bench.gif',
+        instructions: ['Lie flat on the bench.', 'Press the bar to lockout.'],
+        exerciseTips: ['Keep the shoulder blades retracted.'],
+      }];
+      const list = q ? all.filter((e) => e.name.toLowerCase().includes(q)) : all;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { exercises: list } }) });
+    }
+    if (u.pathname === '/images/bench.gif') {
+      return route.fulfill({ status: 200, contentType: 'image/png', body: imageBytes });
+    }
+    return route.fulfill({ status: 404, contentType: 'application/json', body: '{"message":"no route"}' });
+  });
+
+  await p2.addInitScript(() => {
+    localStorage.setItem('liftlog.settings.v1', JSON.stringify({
+      unit: 'kg', restDefault: 120, seeded: true,
+      edb: {
+        host: 'fake.p.rapidapi.com', key: 'k', basePath: '/api/v1/exercises',
+        searchStyle: 'q', mediaTemplate: '/images/{file}', prefer: 'gif',
+      },
+      sync: { token: '', owner: '', repo: 'liftlog-data', path: 'liftlog.json', branch: 'main', enabled: false },
+    }));
+  });
+
+  await p2.goto(BASE, { waitUntil: 'networkidle' });
+  await p2.locator('#tabbar .tab', { hasText: 'Library' }).click();
+  await p2.locator('#view input[type=search]').fill('barbell bench press');
+  await p2.waitForTimeout(300);
+  await p2.locator('#view .row').first().click();
+
+  await p2.waitForSelector('.media-box img', { timeout: 8000 });
+  const loaded = await p2.locator('.media-box img').evaluate((img) => img.complete && img.naturalWidth > 0);
+  if (!loaded) throw new Error('the image element never decoded');
+
+  await p2.waitForSelector('.instructions li');
+  const steps = await p2.locator('.instructions li').count();
+  if (steps !== 2) throw new Error(`expected 2 instruction steps, got ${steps}`);
+
+  if (!seen.includes('/images/bench.gif')) throw new Error(`media route never requested; saw ${seen.join(', ')}`);
+
+  // The discovered link must be stored, so the next open costs no search call.
+  // Writes to localStorage are debounced, so give them a moment to land.
+  await p2.waitForTimeout(600);
+  const stored = await p2.evaluate(() => JSON.parse(localStorage.getItem('liftlog.db.v1') || '{}'));
+  const linked = (stored.exercises || []).find((e) => e.id === 'sx-barbell-bench-press');
+  if (!linked || linked.edbId !== 'exr_1') throw new Error('the ExerciseDB id was not saved onto the exercise');
+
+  await p2.screenshot({ path: `${OUT}/shot-animation.png` });
+  await ctx2.close();
+});
+
 await browser.close();
 console.log('\n--- errors ---');
 console.log(errors.length ? errors.join('\n') : 'none');

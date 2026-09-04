@@ -46,9 +46,10 @@ is fully usable without it — you just get no animations.
 2. On the API's RapidAPI page, open the code snippet and copy the
    `X-RapidAPI-Host` and `X-RapidAPI-Key` values.
 3. In LiftLog: **Settings → Exercise animations**, paste both, then press
-   **Test connection & auto-detect**.
+   **Test connection & auto-detect**, and after it succeeds **Find the media
+   route**.
 
-That last step matters. The two editions differ in base path and search
+Both steps matter. The two editions differ in base path and search
 parameter, and providers change them, so the app does not hard-code a guess: it
 tries `/exercises`, `/api/v1/exercises`, `/api/v2/exercises`, `/v1/exercises` and
 `/v2/exercises` against *your* subscription, works out which search parameter is
@@ -56,11 +57,22 @@ honoured, and stores what actually answered. The log of what it tried is shown o
 screen, so a failure tells you what to fix. If your plan uses a different media
 route, override the URL template under *Advanced endpoint settings*.
 
+The second button does the same job for media. Records come back carrying only a
+bare file name, and each edition serves that file from a different route, so the
+app tries the known shapes (`/image?exerciseId=…`, `/images/{file}`, `/media/{file}`
+and others) against your subscription and keeps whichever returns an actual
+image. If none do, the log prints the raw record so the right route can be added.
+
 Media cannot be loaded with a plain `<img src>` because it needs the key in a
 request header, so LiftLog fetches it, caches the blob in the Cache Storage API
 and shows it from there. Each animation is downloaded **once per device**, and
 browsing the library costs nothing extra — that keeps a free monthly quota
 usable.
+
+The 99 built-in exercises carry no ExerciseDB id, so the first time you open one
+the app looks its name up once, stores the match on the exercise, and every
+later open is instant and offline. That link syncs with the rest of your data,
+so a second device does not spend the lookup again.
 
 ## Setting up backup and sync (optional)
 

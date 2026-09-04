@@ -24,6 +24,27 @@ const SEARCH_STYLES = ['search', 'q', 'name', 'client'];
 
 export const DEFAULT_MEDIA_TEMPLATE = '/image?exerciseId={id}&resolution=180';
 
+/* Media lives behind a different route on every edition of this API, and the
+   record only carries a bare file name. These are the shapes seen in the wild;
+   probeMedia() tries them against the user's own subscription. */
+export const MEDIA_CANDIDATES = [
+  '/image?exerciseId={id}&resolution=180',
+  '/image?exerciseId={id}',
+  '/image?id={id}&resolution=180',
+  '/gif?exerciseId={id}',
+  '/image/{id}',
+  '/images/{file}',
+  '/image/{file}',
+  '/media/{file}',
+  '/exercises/{id}/image',
+  '/exercises/image?exerciseId={id}',
+];
+
+/* Why the last media request failed, so the UI can say something specific
+   instead of a shrug. */
+let lastError = '';
+export const lastMediaError = () => lastError;
+
 export const cfg = () => settings.edb;
 
 export const isConfigured = () => Boolean(cfg().host && cfg().key);
@@ -205,14 +226,19 @@ export async function search({ query = '', bodyPart = '', equipment = '', limit 
   return list;
 }
 
+/** Not every edition exposes /exercises/{id}, so a 404 here is not an error. */
 export async function getById(edbId) {
   const c = cfg();
   if (!isReady()) throw new ApiError('ExerciseDB is not connected yet.');
-  const json = await request(`${c.basePath}/${encodeURIComponent(edbId)}`);
-  const direct = normalize(json?.data ?? json);
-  if (direct?.name) return direct;
-  const list = listFrom(json).map(normalize).filter(Boolean);
-  return list[0] || null;
+  try {
+    const json = await request(`${c.basePath}/${encodeURIComponent(edbId)}`);
+    const direct = normalize(json?.data ?? json);
+    if (direct?.name) return direct;
+    return listFrom(json).map(normalize).filter(Boolean)[0] || null;
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
 }
 
 /* ---------- media --------------------------------------------------------- */
@@ -256,17 +282,95 @@ export async function mediaObjectUrl(exercise, kind = null) {
   const target = mediaEndpoint(exercise, want);
   try {
     const res = await fetch(target.href, target.absolute ? {} : { headers: headers(target.which) });
-    if (!res.ok) throw new ApiError(`media HTTP ${res.status}`, res.status);
+    if (!res.ok) throw new ApiError(`the media route answered HTTP ${res.status}`, res.status);
     const blob = await res.blob();
-    if (blob.size < 64) throw new ApiError('empty media response');
+    if (blob.size < 64) throw new ApiError('the media route returned an empty response');
     await store?.put(cacheKey, new Response(blob, { headers: { 'Content-Type': blob.type || 'image/gif' } }));
     const objUrl = URL.createObjectURL(blob);
     memoryCache.set(cacheKey, objUrl);
     return objUrl;
   } catch (err) {
-    console.warn('media unavailable', exercise.name, err.message);
+    lastError = err instanceof TypeError
+      ? 'the media request was blocked (CORS or no connection)'
+      : err.message;
+    console.warn('media unavailable', exercise.name, lastError);
     return null;
   }
+}
+
+/**
+ * Find the route that actually serves media on this subscription, and store it.
+ * Returns a log of everything tried, because when none of them work the log is
+ * what turns "no animation" into a fixable fact.
+ */
+export async function probeMedia(onStep = () => {}) {
+  const log = [];
+  const note = (line) => { log.push(line); onStep(line); };
+  if (!isReady()) throw new ApiError('Run the endpoint test first.');
+
+  const raw = listFrom(await request(cfg().basePath, { limit: 1, offset: 0 }))[0];
+  if (!raw) throw new ApiError('The exercises endpoint returned no records to test with.');
+  const sample = normalize(raw);
+  note(`Example record: ${sample.name} (id ${sample.edbId || 'none'})`);
+  note(`  imageUrl: ${sample.imageUrl || '(none)'}`);
+  note(`  videoUrl: ${sample.videoUrl || '(none)'}`);
+
+  const check = async (href, useHeaders) => {
+    const res = await fetch(href, useHeaders ? { headers: headers('primary') } : {});
+    if (!res.ok) return `HTTP ${res.status}`;
+    const blob = await res.blob();
+    if (blob.size < 512) return `only ${blob.size} bytes back`;
+    if (blob.type && !/^(image|video|application\/octet-stream)/.test(blob.type)) return `got ${blob.type}`;
+    return { ok: true, type: blob.type || 'unknown', size: blob.size };
+  };
+
+  // A record that already carries a full URL needs no template at all.
+  if (/^https?:\/\//i.test(sample.imageUrl)) {
+    note('The record carries a full image URL — trying it directly …');
+    try {
+      const result = await check(sample.imageUrl, false);
+      if (result.ok) {
+        note(`  ✓ works (${result.type}, ${Math.round(result.size / 1024)} kB) — no template needed`);
+        return { template: '', direct: true, sample, raw, log };
+      }
+      note(`  · ${result}`);
+    } catch (err) {
+      note(`  · ${err instanceof TypeError ? 'blocked (CORS)' : err.message}`);
+    }
+  }
+
+  for (const tpl of MEDIA_CANDIDATES) {
+    const href = url(tpl
+      .replace('{id}', encodeURIComponent(sample.edbId))
+      .replace('{file}', encodeURIComponent(sample.imageUrl || ''))
+      .replace('{res}', '180'), {}, 'primary');
+    note(`Trying ${tpl} …`);
+    try {
+      const result = await check(href, true);
+      if (result.ok) {
+        note(`  ✓ works (${result.type}, ${Math.round(result.size / 1024)} kB)`);
+        cfg().mediaTemplate = tpl;
+        saveSettings();
+        return { template: tpl, direct: false, sample, raw, log };
+      }
+      note(`  · ${result}`);
+    } catch (err) {
+      note(`  · ${err instanceof TypeError ? 'blocked (CORS)' : err.message}`);
+    }
+  }
+  note('None of the known media routes answered with an image.');
+  return { template: '', direct: false, sample, raw, log };
+}
+
+/** Best match for a name, used to attach animations to the built-in exercises. */
+export async function findByName(name) {
+  const list = await search({ query: name, limit: 25 });
+  if (!list.length) return null;
+  const want = name.trim().toLowerCase();
+  return list.find((e) => e.name.toLowerCase() === want)
+    || list.find((e) => e.name.toLowerCase().endsWith(want))
+    || list.find((e) => e.name.toLowerCase().includes(want))
+    || list[0];
 }
 
 export async function clearMediaCache() {
