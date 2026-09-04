@@ -50,15 +50,24 @@
    [hidden], so state the winner once here. */
 [hidden] { display: none !important; }
 
-html, body {
-  height: 100%;
+html { height: 100%; }
+
+/* The shell must match the *visible* viewport, not the layout viewport. With
+   body at 100% (which on mobile is the toolbar-hidden height) and the shell at
+   100dvh, the page could scroll by exactly the height of the address bar —
+   which reads as the app not fitting the screen. Both use dvh, and the page
+   itself never scrolls: scrolling belongs to #view alone. */
+body {
+  height: 100vh;
+  height: 100dvh;
   margin: 0;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 15px;
   line-height: 1.45;
-  overscroll-behavior-y: none;
+  overscroll-behavior: none;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -72,7 +81,10 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 #app {
   display: grid;
   grid-template-rows: auto 1fr auto;
-  height: 100dvh;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 #topbar {
@@ -92,6 +104,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 650; letter-spacing: -0.01em; }
 #topbar-right { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 
 #view {
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;

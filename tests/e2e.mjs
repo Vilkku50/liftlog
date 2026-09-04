@@ -204,6 +204,22 @@ await step('service worker registered', async () => {
   if (!ok) throw new Error('no service worker registration');
 });
 
+await step('the app shell never scrolls the page itself', async () => {
+  for (const tab of ['Home', 'Routines', 'History', 'Library']) {
+    await page.locator('#tabbar .tab', { hasText: tab }).click();
+    await page.waitForTimeout(150);
+    const m = await page.evaluate(() => ({
+      overflow: getComputedStyle(document.body).overflow,
+      slack: document.scrollingElement.scrollHeight - window.innerHeight,
+      tabBottom: document.getElementById('tabbar').getBoundingClientRect().bottom,
+      inner: window.innerHeight,
+    }));
+    if (m.overflow !== 'hidden') throw new Error(`${tab}: body overflow is ${m.overflow}`);
+    if (m.slack > 1) throw new Error(`${tab}: page can scroll ${m.slack}px`);
+    if (m.tabBottom > m.inner + 1) throw new Error(`${tab}: tab bar sits ${m.tabBottom - m.inner}px below the fold`);
+  }
+});
+
 /* ---- animations, against a stand-in for the RapidAPI edition -------------- */
 
 await step('a built-in exercise links itself to ExerciseDB and shows the animation', async () => {
@@ -278,6 +294,69 @@ await step('a built-in exercise links itself to ExerciseDB and shows the animati
 
   await p2.screenshot({ path: `${OUT}/shot-animation.png` });
   await ctx2.close();
+});
+
+await step('a full CDN media URL is shown even when fetch would be blocked by CORS', async () => {
+  const { readFileSync } = await import('node:fs');
+  const imageBytes = readFileSync(new URL('../icons/icon-512.png', import.meta.url));
+
+  const ctx3 = await browser.newContext({ ...devices['Pixel 7'] });
+  const p3 = await ctx3.newPage();
+  let cdnHits = 0;
+
+  await ctx3.route('https://fake.p.rapidapi.com/**', async (route) => {
+    const u = new URL(route.request().url());
+    if (u.pathname !== '/api/v1/exercises') {
+      return route.fulfill({ status: 404, contentType: 'application/json', body: '{"message":"no route"}' });
+    }
+    const q = (u.searchParams.get('q') || '').toLowerCase();
+    // Shaped exactly like the real record: a full CDN URL, no instructions.
+    const all = [{
+      exerciseId: 'edb_0LC083m',
+      name: 'barbell standing close grip curl',
+      imageUrl: 'https://assets.example.test/media/d5xI91c.png',
+      bodyParts: ['upper arms'],
+      equipments: ['barbell'],
+      targetMuscles: ['biceps'],
+      secondaryMuscles: ['forearms'],
+    }];
+    const list = q ? all.filter((e) => e.name.includes(q)) : all;
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: { exercises: list } }) });
+  });
+
+  // Fulfilled without Access-Control-Allow-Origin: <img> can show it, fetch() cannot.
+  await ctx3.route('https://assets.example.test/**', async (route) => {
+    cdnHits += 1;
+    return route.fulfill({ status: 200, contentType: 'image/png', body: imageBytes });
+  });
+
+  await p3.addInitScript(() => {
+    localStorage.setItem('liftlog.settings.v1', JSON.stringify({
+      unit: 'kg', restDefault: 120, seeded: true,
+      edb: { host: 'fake.p.rapidapi.com', key: 'k', basePath: '/api/v1/exercises', searchStyle: 'q', mediaTemplate: '', prefer: 'gif' },
+      sync: { token: '', owner: '', repo: 'liftlog-data', path: 'liftlog.json', branch: 'main', enabled: false },
+    }));
+  });
+
+  await p3.goto(BASE, { waitUntil: 'networkidle' });
+  await p3.locator('#tabbar .tab', { hasText: 'Library' }).click();
+  // This movement is not in the built-in catalogue, so search ExerciseDB itself.
+  await p3.locator('#view .segmented button', { hasText: 'ExerciseDB' }).click();
+  await p3.locator('#view input[type=search]').fill('barbell standing close grip curl');
+  await p3.waitForTimeout(600);
+  await p3.locator('#view .row').first().click();
+
+  await p3.waitForSelector('.media-box img', { timeout: 8000 });
+  const shown = await p3.locator('.media-box img').evaluate((img) => ({
+    src: img.src, decoded: img.complete && img.naturalWidth > 0,
+  }));
+  if (!shown.decoded) throw new Error('the CDN image never decoded');
+  if (!shown.src.startsWith('https://assets.example.test/')) throw new Error(`expected the CDN URL, got ${shown.src}`);
+  if (!cdnHits) throw new Error('the CDN was never asked for the image');
+
+  await p3.waitForTimeout(400);   // let the sheet's entry animation settle
+  await p3.screenshot({ path: `${OUT}/shot-cdn-media.png` });
+  await ctx3.close();
 });
 
 await browser.close();

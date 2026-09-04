@@ -109,6 +109,36 @@ const firstOf = (obj, keys) => {
 
 const asArray = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 
+const MEDIA_RX = /\.(gif|webp|png|jpe?g|mp4|webm|mov)(\?|#|$)/i;
+
+/**
+ * Editions disagree on where media lives — gifUrl, imageUrl, a nested media
+ * object, sometimes a bare file name and sometimes a full CDN URL. Rather than
+ * guessing a field, walk the record and collect anything that looks like media.
+ */
+function collectMedia(raw) {
+  const found = [];
+  const walk = (value, key) => {
+    if (typeof value === 'string') {
+      if (value && !value.includes(' ') && MEDIA_RX.test(value)) found.push({ key, url: value });
+    } else if (Array.isArray(value)) {
+      value.forEach((v) => walk(v, key));
+    } else if (value && typeof value === 'object') {
+      Object.entries(value).forEach(([k, v]) => walk(v, k));
+    }
+  };
+  Object.entries(raw).forEach(([k, v]) => walk(v, k));
+
+  const isGif = (m) => /gif/i.test(m.key) || /\.gif(\?|#|$)/i.test(m.url);
+  const isVideo = (m) => /video/i.test(m.key) || /\.(mp4|webm|mov)(\?|#|$)/i.test(m.url);
+  return {
+    gif: found.find(isGif)?.url || '',
+    video: found.find(isVideo)?.url || '',
+    still: found.find((m) => !isGif(m) && !isVideo(m))?.url || '',
+    all: found,
+  };
+}
+
 /** Map an upstream record to the shape the rest of the app understands. */
 export function normalize(raw) {
   if (!raw || typeof raw !== 'object') return null;
@@ -119,6 +149,7 @@ export function normalize(raw) {
   const targets = asArray(firstOf(raw, ['targetMuscles', 'target', 'primaryMuscles'])).map(titleCase);
   const secondary = asArray(firstOf(raw, ['secondaryMuscles', 'secondary_muscles'])).map(titleCase);
   const equipments = asArray(firstOf(raw, ['equipments', 'equipment'])).map(titleCase);
+  const media = collectMedia(raw);
   return {
     edbId: id,
     name,
@@ -126,12 +157,14 @@ export function normalize(raw) {
     targets,
     secondary,
     equipments,
+    media,
     instructions: asArray(firstOf(raw, ['instructions', 'steps'])).map(String),
     tips: asArray(firstOf(raw, ['exerciseTips', 'tips'])).map(String),
     variations: asArray(firstOf(raw, ['variations'])).map(String),
     overview: firstOf(raw, ['overview', 'description']) || '',
-    imageUrl: firstOf(raw, ['gifUrl', 'imageUrl', 'image', 'gif']) || '',
-    videoUrl: firstOf(raw, ['videoUrl', 'video']) || '',
+    // An animation beats a still, but a still beats nothing at all.
+    imageUrl: media.gif || firstOf(raw, ['gifUrl', 'imageUrl', 'image', 'gif']) || media.still || '',
+    videoUrl: media.video || firstOf(raw, ['videoUrl', 'video']) || '',
     raw,
   };
 }
@@ -247,6 +280,8 @@ function mediaEndpoint(exercise, kind) {
   const c = cfg();
   const file = kind === 'video' ? exercise.videoUrl : exercise.imageUrl;
   if (file && /^https?:\/\//i.test(file)) return { absolute: true, href: file };
+  // Nothing to build a request from.
+  if (!file && !exercise.edbId) return { absolute: false, href: '' };
 
   const tpl = (kind === 'video' ? c.videoTemplate : c.mediaTemplate) || DEFAULT_MEDIA_TEMPLATE;
   const path = tpl
@@ -262,12 +297,28 @@ async function cacheStore() {
 }
 
 /**
- * Object URL for an exercise animation. Cached per device after the first
- * fetch. Resolves to null when the media cannot be loaded — callers show a
- * placeholder rather than an error.
+ * Where to show an exercise's media from, as { src, isVideo }.
+ *
+ * A full CDN URL is handed straight to the <img> tag: images are not subject to
+ * CORS the way fetch() is, and the CDN serving this API's media sends no CORS
+ * headers, so fetching it into a blob fails where the plain tag succeeds. Only
+ * key-protected routes on the API host go through fetch, and those are cached
+ * as blobs so an animation is downloaded once per device.
  */
-export async function mediaObjectUrl(exercise, kind = null) {
+export async function mediaSource(exercise, kind = null) {
   const want = kind || (cfg().prefer === 'video' ? 'video' : 'gif');
+  const target = mediaEndpoint(exercise, want);
+  if (!target.href) { lastError = 'this exercise has no media in the API record'; return null; }
+
+  const looksVideo = /\.(mp4|webm|mov)(\?|#|$)/i.test(target.href) || (want === 'video' && !target.absolute);
+  if (target.absolute) return { src: target.href, isVideo: looksVideo };
+
+  const objUrl = await cachedBlobUrl(exercise, want, target);
+  return objUrl ? { src: objUrl, isVideo: looksVideo } : null;
+}
+
+/** Fetch-and-cache path, for media that needs the API key in a request header. */
+async function cachedBlobUrl(exercise, want, target) {
   const cacheKey = `https://liftlog.media/${want}/${encodeURIComponent(exercise.edbId || exercise.name)}`;
   if (memoryCache.has(cacheKey)) return memoryCache.get(cacheKey);
 
@@ -279,9 +330,8 @@ export async function mediaObjectUrl(exercise, kind = null) {
     return objUrl;
   }
 
-  const target = mediaEndpoint(exercise, want);
   try {
-    const res = await fetch(target.href, target.absolute ? {} : { headers: headers(target.which) });
+    const res = await fetch(target.href, { headers: headers(target.which) });
     if (!res.ok) throw new ApiError(`the media route answered HTTP ${res.status}`, res.status);
     const blob = await res.blob();
     if (blob.size < 64) throw new ApiError('the media route returned an empty response');
@@ -298,6 +348,19 @@ export async function mediaObjectUrl(exercise, kind = null) {
   }
 }
 
+/** True when the browser can actually paint this URL in an <img>. */
+function imageLoads(src, timeoutMs = 8000) {
+  if (typeof Image === 'undefined') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const img = new Image();
+    const finish = (ok) => { img.onload = null; img.onerror = null; resolve(ok); };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    img.onload = () => { clearTimeout(timer); finish(img.naturalWidth > 0); };
+    img.onerror = () => { clearTimeout(timer); finish(false); };
+    img.src = src;
+  });
+}
+
 /**
  * Find the route that actually serves media on this subscription, and store it.
  * Returns a log of everything tried, because when none of them work the log is
@@ -308,36 +371,41 @@ export async function probeMedia(onStep = () => {}) {
   const note = (line) => { log.push(line); onStep(line); };
   if (!isReady()) throw new ApiError('Run the endpoint test first.');
 
-  const raw = listFrom(await request(cfg().basePath, { limit: 1, offset: 0 }))[0];
-  if (!raw) throw new ApiError('The exercises endpoint returned no records to test with.');
-  const sample = normalize(raw);
-  note(`Example record: ${sample.name} (id ${sample.edbId || 'none'})`);
-  note(`  imageUrl: ${sample.imageUrl || '(none)'}`);
-  note(`  videoUrl: ${sample.videoUrl || '(none)'}`);
+  const page = listFrom(await request(cfg().basePath, { limit: 10, offset: 0 }));
+  if (!page.length) throw new ApiError('The exercises endpoint returned no records to test with.');
+  const records = page.map(normalize).filter(Boolean);
+  const sample = records.find((r) => r.imageUrl || r.videoUrl) || records[0];
+  const raw = page[records.indexOf(sample)] ?? page[0];
 
-  const check = async (href, useHeaders) => {
-    const res = await fetch(href, useHeaders ? { headers: headers('primary') } : {});
+  const gifs = records.filter((r) => r.media?.gif).length;
+  const videos = records.filter((r) => r.media?.video).length;
+  const stills = records.filter((r) => !r.media?.gif && !r.media?.video && r.media?.still).length;
+  note(`Checked ${records.length} records: ${gifs} animated, ${videos} with video, ${stills} with a still image only.`);
+  note(`Example: ${sample.name} (id ${sample.edbId || 'none'})`);
+  note(`  image: ${sample.imageUrl || '(none)'}`);
+  note(`  video: ${sample.videoUrl || '(none)'}`);
+
+  // A full URL needs no template — but it does have to survive being shown.
+  if (/^https?:\/\//i.test(sample.imageUrl)) {
+    note('The record carries a full media URL — checking that it displays …');
+    if (await imageLoads(sample.imageUrl)) {
+      note('  ✓ displays directly, no template needed');
+      cfg().mediaTemplate = '';
+      saveSettings();
+      await probeDetailRoute(sample, note);
+      return { template: '', direct: true, sample, raw, log };
+    }
+    note('  · the browser could not display it (dead link, or hotlinking blocked)');
+  }
+
+  const check = async (href) => {
+    const res = await fetch(href, { headers: headers('primary') });
     if (!res.ok) return `HTTP ${res.status}`;
     const blob = await res.blob();
     if (blob.size < 512) return `only ${blob.size} bytes back`;
     if (blob.type && !/^(image|video|application\/octet-stream)/.test(blob.type)) return `got ${blob.type}`;
     return { ok: true, type: blob.type || 'unknown', size: blob.size };
   };
-
-  // A record that already carries a full URL needs no template at all.
-  if (/^https?:\/\//i.test(sample.imageUrl)) {
-    note('The record carries a full image URL — trying it directly …');
-    try {
-      const result = await check(sample.imageUrl, false);
-      if (result.ok) {
-        note(`  ✓ works (${result.type}, ${Math.round(result.size / 1024)} kB) — no template needed`);
-        return { template: '', direct: true, sample, raw, log };
-      }
-      note(`  · ${result}`);
-    } catch (err) {
-      note(`  · ${err instanceof TypeError ? 'blocked (CORS)' : err.message}`);
-    }
-  }
 
   for (const tpl of MEDIA_CANDIDATES) {
     const href = url(tpl
@@ -346,11 +414,12 @@ export async function probeMedia(onStep = () => {}) {
       .replace('{res}', '180'), {}, 'primary');
     note(`Trying ${tpl} …`);
     try {
-      const result = await check(href, true);
+      const result = await check(href);
       if (result.ok) {
         note(`  ✓ works (${result.type}, ${Math.round(result.size / 1024)} kB)`);
         cfg().mediaTemplate = tpl;
         saveSettings();
+        await probeDetailRoute(sample, note);
         return { template: tpl, direct: false, sample, raw, log };
       }
       note(`  · ${result}`);
@@ -359,7 +428,33 @@ export async function probeMedia(onStep = () => {}) {
     }
   }
   note('None of the known media routes answered with an image.');
+  await probeDetailRoute(sample, note);
   return { template: '', direct: false, sample, raw, log };
+}
+
+/**
+ * The list endpoint may return summaries only. Find out whether a per-exercise
+ * route exists, so instructions are only requested when they can actually come.
+ */
+async function probeDetailRoute(sample, note) {
+  if (!sample.edbId) return;
+  note(`Checking ${cfg().basePath}/{id} for instructions …`);
+  try {
+    const detail = await getById(sample.edbId);
+    if (!detail) {
+      note('  · no per-exercise route on this plan');
+      cfg().detailRoute = false;
+    } else {
+      note(detail.instructions.length
+        ? `  ✓ returns ${detail.instructions.length} instruction steps`
+        : '  · answers, but carries no instructions');
+      cfg().detailRoute = true;
+    }
+  } catch (err) {
+    note(`  · ${err.message}`);
+    cfg().detailRoute = false;
+  }
+  saveSettings();
 }
 
 /** Best match for a name, used to attach animations to the built-in exercises. */

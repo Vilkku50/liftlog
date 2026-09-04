@@ -57,17 +57,24 @@ honoured, and stores what actually answered. The log of what it tried is shown o
 screen, so a failure tells you what to fix. If your plan uses a different media
 route, override the URL template under *Advanced endpoint settings*.
 
-The second button does the same job for media. Records come back carrying only a
-bare file name, and each edition serves that file from a different route, so the
-app tries the known shapes (`/image?exerciseId=…`, `/images/{file}`, `/media/{file}`
-and others) against your subscription and keeps whichever returns an actual
-image. If none do, the log prints the raw record so the right route can be added.
+The second button does the same job for media, which arrives in one of two
+shapes depending on the edition:
 
-Media cannot be loaded with a plain `<img src>` because it needs the key in a
-request header, so LiftLog fetches it, caches the blob in the Cache Storage API
-and shows it from there. Each animation is downloaded **once per device**, and
-browsing the library costs nothing extra — that keeps a free monthly quota
-usable.
+- **A full CDN URL** (`https://assets.exercisedb.dev/media/….png`). It is handed
+  straight to the `<img>` tag. That matters: the media CDN sends no CORS
+  headers, so `fetch()` is blocked while the plain tag loads it fine — reading
+  the image into a blob first would show nothing at all.
+- **A bare file name**, served from a key-protected route on the API host. Those
+  differ per edition, so the app tries the known shapes (`/image?exerciseId=…`,
+  `/images/{file}`, `/media/{file}` and others) against your subscription and
+  keeps whichever returns a real image. Because these need the key in a request
+  header, they are fetched and cached as blobs in the Cache Storage API —
+  downloaded **once per device**, so browsing costs no extra quota.
+
+The same test also reports how many of the sampled records are animated versus
+still images, and whether a per-exercise route exists for the step-by-step
+instructions. If nothing works, it prints the raw record so the right route can
+be added.
 
 The 99 built-in exercises carry no ExerciseDB id, so the first time you open one
 the app looks its name up once, stores the match on the exercise, and every

@@ -70,10 +70,10 @@ export function mediaBox(exercise, remote = null) {
     const kind = settings.edb.prefer === 'video' ? 'video' : 'gif';
     // Whichever format the user prefers, fall back to the other rather than
     // showing nothing when only one of the two covers this movement.
-    const objUrl = await edb.mediaObjectUrl(ref, kind)
-      || await edb.mediaObjectUrl(ref, kind === 'gif' ? 'video' : 'gif');
+    const media = await edb.mediaSource(ref, kind)
+      || await edb.mediaSource(ref, kind === 'gif' ? 'video' : 'gif');
 
-    if (!objUrl) {
+    if (!media) {
       box.innerHTML = '';
       box.append(el('div', { class: 'media-note' },
         `Could not load the animation — ${edb.lastMediaError() || 'no reason given'}.`,
@@ -86,10 +86,12 @@ export function mediaBox(exercise, remote = null) {
     }
 
     box.innerHTML = '';
-    const isVideo = /^blob:/.test(objUrl) && kind === 'video';
-    box.append(isVideo
-      ? el('video', { src: objUrl, autoplay: true, loop: true, muted: true, playsinline: true })
-      : el('img', { src: objUrl, alt: exercise.name }));
+    const shown = media.isVideo
+      ? el('video', { src: media.src, autoplay: true, loop: true, muted: true, playsinline: true })
+      : el('img', { src: media.src, alt: exercise.name, loading: 'lazy' });
+    // A cross-origin URL is shown without a fetch, so failure surfaces here.
+    shown.addEventListener('error', () => note('The media host did not serve this file to the app.'));
+    box.append(shown);
   })();
 
   return box;
